@@ -26,10 +26,6 @@ license: GPL3
 
 from pydantic import BaseModel, Field
 import os
-import urllib
-import hashlib
-from bs4 import BeautifulSoup
-from io import StringIO, BytesIO
 
 
 class Tools:
@@ -43,26 +39,6 @@ class Tools:
         self.valves = self.Valves()
 
         pass
-
-    def _request(self, url):
-        """
-        INTERNAL FUNCTION, DO NOT USE!
-        """
-        # internal function, not for use by the llm
-
-        try:
-            conn = urllib.request.urlopen(
-                urllib.request.Request(
-                    url=url,
-                    headers={"User-Agent": self.valves.user_agent},
-                )
-            )
-        except urllib.request.URLError:
-            raise Exception("Error: the URL was unreachable")
-        except urllib.request.HTTPError as e:
-            raise Exception(f"HTTP Error: {e.code} {e.reason}")
-
-        return conn
 
     def process_url(self, url: str) -> str:
         """
@@ -89,22 +65,140 @@ class Tools:
         - youtube videos
         - executables
         """
-        url_parser = urllib.parse.urlparse(url)
 
-        domain = url_parser.netloc
-        file_name = url_parser.path.split("/")[-1]
-        file_name_split = file_name.split(".")
-        file_ext = file_name_split[-1].lower()
+        # import only if this function is called, saves time and memory when the AI isn't actually using this call.
+        import urllib
 
-        # get the content of whatever file is at the url
-        file_content = self._request(url).read()
-
-        output = False
-        if "youtube" in domain or "youtu.be" in domain:
-            # this is a youtube link. try and get the transcript!
-            import youtube_transcript_api
-
+        # we define functions inside this method so that the AI can't call them
+        def _request(url):
             try:
+                conn = urllib.request.urlopen(
+                    urllib.request.Request(
+                        url=url,
+                        headers={"User-Agent": self.valves.user_agent},
+                    )
+                )
+            except urllib.request.URLError:
+                raise Exception("Error: the URL was unreachable")
+            except urllib.request.HTTPError as e:
+                raise Exception(f"HTTP Error: {e.code} {e.reason}")
+
+            return conn
+
+        def remove_duplicates(lst: list):
+            # removes duplicates from a list
+
+            new_lst = []
+            for item in lst:
+                if item not in new_lst:
+                    new_lst.append(item)
+            return new_lst
+
+        def process_webpage(html):
+            # uses beautifulsoup to scrape a webpage
+
+            output = {}
+
+            import re
+            from bs4 import BeautifulSoup
+
+            soup = BeautifulSoup(html, "html.parser")
+
+            # we can usually get plenty of information from just the title, headers and paragraphs of a page!
+            try:
+                output["title"] = soup.find("title").get_text().strip()
+            except AttributeError:
+                # no title found
+                pass
+
+            output["headers"] = []
+            for header in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]):
+                output["headers"].append(header.get_text().strip())
+            if not output["headers"]:
+                del output["headers"]
+
+            output["paragraphs"] = []
+            for para in soup.find_all("p"):
+                output["paragraphs"].append(para.get_text().strip())
+            if not output["paragraphs"]:
+                del output["paragraphs"]
+
+            output["images"] = []
+            for image in soup.find_all("img"):
+                if image.get("alt"):
+                    output["images"].append(image.get("alt"))
+
+            if not output["images"]:
+                del output["images"]
+
+            # remove duplicates
+            for category in output.keys():
+                if category == "title":
+                    continue
+
+                output[category] = remove_duplicates(output[category])
+
+            # but not always...
+            if "headers" not in output.keys() and "paragraphs" not in output.keys():
+                # if nothing was found, first, fall back on common CSS classes
+                output["classes"] = {}
+                for class_name in (
+                    "content",
+                    "description",
+                    "title",
+                    "text",
+                    "article",
+                ):
+                    output["classes"][class_name] = []
+                    for element in soup.find_all(
+                        class_=re.compile(rf"\b{class_name}\b")
+                    ):
+                        if element.text != "":
+                            output["classes"][class_name].append(element.text)
+                    # also get elements by id
+                    for element in soup.find_all(id=re.compile(rf"\b{class_name}\b")):
+                        if element.text != "":
+                            output["classes"][class_name].append(element.text)
+
+                    if not output["classes"][class_name]:
+                        # no data found for the class? just delete it from the response
+                        del output["classes"][class_name]
+                        continue
+
+                    # remove duplicates
+                    output["classes"][class_name] = remove_duplicates(
+                        output["classes"][class_name]
+                    )
+
+                if not output["classes"]:
+                    # still nothing?
+                    # then fall back on links if nothing could be extracted from the other html elements.
+                    # this is a last resort because it tends to be a lot of data to process
+
+                    del output["classes"]
+
+                    output["urls"] = []
+                    for a in soup.find_all("a", href=True):
+                        output["urls"].append(a["href"])
+
+                    # remove duplicate links
+                    output["urls"] = remove_duplicates(output["urls"])
+
+                    if not output["urls"]:
+                        # alright, theres no saving this one. at least we have a title!
+                        del output["urls"]
+
+                        output["message"] = (
+                            "nothing could be scraped from the page! use a web search tool call to find more information about this website."
+                        )
+
+            return output
+
+        def process_domains(domain, url):
+            if "youtube" in domain or "youtu.be" in domain:
+                # this is a youtube link. try and get the transcript!
+                import youtube_transcript_api
+
                 # get video transcript using a python module
                 ytt_api = youtube_transcript_api.YouTubeTranscriptApi()
 
@@ -123,9 +217,9 @@ class Tools:
                         raise Exception(f"ERROR: malformed youtube URL! {e}")
                 elif domain == "youtu.be":
                     try:
-                        video_id = file_name.split("?")[0]
+                        video_id = url.split("?")[0]
                     except IndexError:
-                        video_id = file_name
+                        video_id = url.split("/")[-1]
 
                 try:
                     transcript_obj = ytt_api.fetch(video_id)
@@ -146,7 +240,9 @@ class Tools:
                 transcript = " ".join(transcript)
 
                 # get video title using beautifulsoup
-                html = self._request(url).read()
+                from bs4 import BeautifulSoup
+
+                html = _request(url).read()
                 soup = BeautifulSoup(html, "html.parser")
                 title = soup.find("title").get_text().strip()
 
@@ -160,30 +256,46 @@ class Tools:
                         "words": len(transcript.split(" ")),
                     },
                 }
-            except Exception as e:
-                # many things can go wrong. i don't feel like catching each and every exception..
-                # mostly, youtube transcript api needs to be kept up to date because youtube keeps changing.
-                # and the pip version is far behind the git version.
-                # you need the git version. and it's a bit of a hassle to install.
-                # you basically need to get into openwebui's virtualenv and then manually git clone
-                # the correct version instead of using pip.
 
-                # so if it fails, just fall back on just processing it as a webpage.
-                # at least we get the title that way!
-                pass
+            return False
+
+        ####################
+        # start main url processing
+        #####
+        output = {}
+
+        # parse the URL
+        url_parser = urllib.parse.urlparse(url)
+
+        domain = url_parser.netloc
+        file_name = url_parser.path.split("/")[-1]
+        file_name_split = file_name.split(".")
+        file_type = file_name_split[-1].lower() if len(file_name_split) > 1 else ""
+
+        # first, process any special domains, such as youtube
+        output = process_domains(domain, url)
+        if output:
+            return output
+
+        # then if that didn't do anything, switch to processing based on file type
+        from io import StringIO, BytesIO
+        import hashlib
+
+        # get the content of whatever file is at the url
+        file_content = _request(url).read()
 
         if (
-            file_ext in ("htm", "html", "xhtml", "php", "asp")
+            file_type in ("htm", "html", "xhtml", "php", "asp")
             or len(file_name_split) <= 1
         ):
             # it's a normal web page
-            output = self._process_webpage(url)
+            output = process_webpage(file_content)
 
             # make it look fancy to the llm
-            file_ext = "website"
-        elif file_ext in ("txt", "md", "json", "log", "ini", "conf", "cfg"):
+            file_type = "website"
+        elif file_type in ("txt", "md", "json", "log", "ini", "conf", "cfg"):
             output = str(file_content)
-        elif file_ext in (
+        elif file_type in (
             "sh",
             "bat",
             "py",
@@ -201,15 +313,15 @@ class Tools:
             "css",
         ):
             output = str(file_content)
-        elif file_ext in ("jpg", "jpeg", "png", "gif"):
+        elif file_type in ("jpg", "jpeg", "png", "gif"):
             import base64
 
             output = base64.b64encode(file_content).decode("utf-8")
-        elif file_ext == "xml":
+        elif file_type == "xml":
             import xmltodict
 
             output = xmltodict.parse(file_content)
-        elif file_ext == "yaml":
+        elif file_type == "yaml":
             import yaml
             import json
 
@@ -217,28 +329,30 @@ class Tools:
                 output = json.dumps(yaml.safe_load(file_content), indent=2)
             except yaml.YAMLError as e:
                 return f"YAML Error: {e}"
-        elif file_ext == "csv":
+        elif file_type == "csv":
             import csv
 
             output = []
             for row in csv.reader(StringIO(str(file_content))):
                 output.append(list(row))
 
-        elif file_ext == "pdf":
+        elif file_type == "pdf":
             import pypdf
 
             pdf_reader = pypdf.PdfReader(BytesIO(file_content))
             pages_text = []
             for page in pdf_reader.pages:
-                pages_text.append(page.extract_text())
+                text = page.extract_text()
+                if text:
+                    pages_text.append(text)
 
             output = pages_text
-        elif file_ext in ("mp3", "m4a", "ogg", "flac", "wma", "aiff", "wav"):
+        elif file_type in ("mp3", "m4a", "ogg", "flac", "wma", "aiff", "wav"):
             import tinytag
 
             tag_reader = tinytag.TinyTag.get(file_obj=BytesIO(file_content))
             output = tag_reader.as_dict()
-        elif file_ext in ("mp4", "mov", "avi"):
+        elif file_type in ("mp4", "mov", "avi"):
             import moviepy
             import tempfile
 
@@ -249,6 +363,7 @@ class Tools:
                 tmp.write(file_content)
                 tmp_path = tmp.name
             clip = moviepy.VideoFileClip(tmp_path)
+            clip.close()
             os.remove(tmp_path)
 
             output = {
@@ -261,20 +376,20 @@ class Tools:
                 "audio_fps": clip.audio.fps if clip.audio else None,
                 "misc": clip.reader.infos,
             }
-        elif file_ext == "zip":
+        elif file_type == "zip":
             import zipfile
 
             zip = zipfile.ZipFile(BytesIO(file_content))
 
             output = zip.namelist()
-        elif file_ext == "rar":
+        elif file_type == "rar":
             import rarfile
 
             rar = rarfile.RarFile(BytesIO(file_content))
             output = []
             for f in rar.infolist():
                 output.append(f.filename)
-        elif file_ext in ("tar", "gz"):
+        elif file_type in ("tar", "gz"):
             import tarfile
 
             tar = tarfile.open(fileobj=BytesIO(file_content))
@@ -282,7 +397,7 @@ class Tools:
             output = []
             for f in tar.getmembers():
                 output.append(f.name)
-        elif file_ext in ("exe", "dll", "msi", "com", "cmd", "msp", "so", "a", "la"):
+        elif file_type in ("exe", "dll", "msi", "com", "cmd", "msp", "so", "a", "la"):
             return "user submitted an executable file. use a tool call that searches the web to fetch further information."
         else:
             # some unknown file format
@@ -292,7 +407,7 @@ class Tools:
 
         return {
             "filename": file_name_split[0],
-            "type": file_ext,
+            "type": file_type,
             "size": len(file_content),
             "checksum": hashlib.sha256(file_content).hexdigest(),
             "domain": domain,
@@ -306,100 +421,8 @@ class Tools:
         """
         output = []
         for url in urls:
-            output.append(self.process_url(url))
-        return output
-
-    def _process_webpage(self, url):
-        """
-        INTERNAL FUNCTION, DO NOT USE!
-        """
-        # internal function, not for use by the llm
-
-        # uses beautifulsoup to scrape a webpage
-
-        import re
-
-        html = self._request(url).read()
-        soup = BeautifulSoup(html, "html.parser")
-
-        output = {}
-
-        # we can usually get plenty of information from just the title, headers and paragraphs of a page!
-        try:
-            output["title"] = soup.find("title").get_text().strip()
-        except AttributeError:
-            # no title found
-            pass
-
-        output["headers"] = []
-        for header in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]):
-            output["headers"].append(header.get_text().strip())
-        if not output["headers"]:
-            del output["headers"]
-
-        output["paragraphs"] = []
-        for para in soup.find_all("p"):
-            output["paragraphs"].append(para.get_text().strip())
-        if not output["paragraphs"]:
-            del output["paragraphs"]
-
-        output["images"] = []
-        for image in soup.find_all("img"):
-            if image.get("alt"):
-                output["images"].append(image.get("alt"))
-
-        if not output["images"]:
-            del output["images"]
-
-        # remove duplicates
-        for category in output.keys():
-            if category == "title":
-                continue
-
-            output[category] = list(set(output[category]))
-
-        # but not always...
-        if "headers" not in output.keys() and "paragraphs" not in output.keys():
-            # if nothing was found, first, fall back on common CSS classes
-            output["classes"] = {}
-            for class_name in ("content", "description", "title", "text", "article"):
-                output["classes"][class_name] = []
-                for element in soup.find_all(class_=re.compile(rf"\b{class_name}\b")):
-                    if element.text != "":
-                        output["classes"][class_name].append(element.text)
-                # also get elements by id
-                for element in soup.find_all(id=re.compile(rf"\b{class_name}\b")):
-                    if element.text != "":
-                        output["classes"][class_name].append(element.text)
-
-                if not output["classes"][class_name]:
-                    # no data found for the class? just delete it from the response
-                    del output["classes"][class_name]
-                    continue
-
-                # remove duplicates
-                output["classes"][class_name] = list(set(output["classes"][class_name]))
-
-            if not output["classes"]:
-                # still nothing?
-                # then fall back on links if nothing could be extracted from the other html elements.
-                # this is a last resort because it tends to be a lot of data to process
-
-                del output["classes"]
-
-                output["urls"] = []
-                for a in soup.find_all("a", href=True):
-                    output["urls"].append(a["href"])
-
-                # remove duplicate links
-                output["urls"] = list(set(output["urls"]))
-
-                if not output["urls"]:
-                    # alright, theres no saving this one. at least we have a title!
-                    del output["urls"]
-
-                    output["message"] = (
-                        "nothing could be scraped from the page! use a web search tool call to find more information about this website."
-                    )
-
+            try:
+                output.append(self.process_url(url))
+            except Exception as e:
+                output.append([f"ERROR PROCESSING URL {url}: {e}"])
         return output
