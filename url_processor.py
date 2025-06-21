@@ -421,8 +421,8 @@ class Tools:
 
     def process_multiple_urls(self, urls: list) -> str:
         """
-        processes multiple url's in sequence.
-        use this if user provided multiple url's.
+        processes multiple url's in sequence. can process the exact same data types as process_url.
+        use this instead of process_url if user provided multiple url's!
         """
         output = []
         for url in urls:
