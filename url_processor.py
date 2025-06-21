@@ -64,7 +64,7 @@ class Tools:
         - images
         - music
         - videos
-        - pdf's
+        - PDFs
         - documents
         - archive files such as zip and rar
         - youtube videos
@@ -81,7 +81,8 @@ class Tools:
                     urllib.request.Request(
                         url=url,
                         headers={"User-Agent": self.valves.user_agent},
-                    )
+                    ),
+                    timeout=10,
                 )
             except urllib.request.URLError:
                 raise Exception("Error: the URL was unreachable")
@@ -204,6 +205,8 @@ class Tools:
                 # this is a youtube link. try and get the transcript!
                 import youtube_transcript_api
 
+                err = None
+
                 # get video transcript using a python module
                 ytt_api = youtube_transcript_api.YouTubeTranscriptApi()
 
@@ -219,7 +222,7 @@ class Tools:
                         # then get everything after ?v=
                         video_id = video_id.split("?v=")[1]
                     except Exception as e:
-                        raise Exception(f"ERROR: malformed youtube URL! {e}")
+                        err = f"ERROR: malformed youtube URL! {e}"
                 elif domain == "youtu.be":
                     try:
                         video_id = url.split("?")[0]
@@ -235,14 +238,7 @@ class Tools:
                         transcript_obj_list = list(ytt_api.list(video_id))
                         transcript_obj = transcript_obj_list[0].fetch()
                     except Exception as e:
-                        raise Exception(
-                            f"ERROR: error while fetching youtube transcript! {e}"
-                        )
-
-                transcript = []
-                for snippet in transcript_obj:
-                    transcript.append(snippet.text)
-                transcript = " ".join(transcript)
+                        err = f"couldn't find subtitles. tell the user the title of the video!"
 
                 # get video title using beautifulsoup
                 from bs4 import BeautifulSoup
@@ -251,16 +247,24 @@ class Tools:
                 soup = BeautifulSoup(html, "html.parser")
                 title = soup.find("title").get_text().strip()
 
-                return {
-                    "type": "youtube",
-                    "title": title,
-                    "transcript": {
+                transcript_dict = {"type": "youtube", "title": title}
+
+                if not err:
+                    transcript = []
+                    for snippet in transcript_obj:
+                        transcript.append(snippet.text)
+                    transcript_text = " ".join(transcript)
+
+                    transcript_dict["transcript"] = {
                         "language": f"({transcript_obj.language_code}) {transcript_obj.language}",
                         "auto_generated": transcript_obj.is_generated,
-                        "content": transcript,
-                        "words": len(transcript.split(" ")),
-                    },
-                }
+                        "content": transcript_text,
+                        "words": len(transcript_text.split(" ")),
+                    }
+                else:
+                    transcript_dict["error"] = err
+
+                return transcript_dict
 
             return False
 
@@ -294,12 +298,12 @@ class Tools:
             or len(file_name_split) <= 1
         ):
             # it's a normal web page
-            output = process_webpage(file_content)
+            output = process_webpage(file_content.decode(errors="replace"))
 
             # make it look fancy to the llm
             file_type = "website"
         elif file_type in ("txt", "md", "json", "log", "ini", "conf", "cfg"):
-            output = str(file_content)
+            output = file_content.decode(errors="replace")
         elif file_type in (
             "sh",
             "bat",
@@ -317,7 +321,7 @@ class Tools:
             "sql",
             "css",
         ):
-            output = str(file_content)
+            output = file_content.decode(errors="replace")
         elif file_type in ("jpg", "jpeg", "png", "gif"):
             import base64
 
@@ -325,20 +329,22 @@ class Tools:
         elif file_type == "xml":
             import xmltodict
 
-            output = xmltodict.parse(file_content)
+            output = xmltodict.parse(file_content.decode(errors="replace"))
         elif file_type == "yaml":
             import yaml
             import json
 
             try:
-                output = json.dumps(yaml.safe_load(file_content), indent=2)
+                output = json.dumps(
+                    yaml.safe_load(file_content.decode(errors="replace")), indent=2
+                )
             except yaml.YAMLError as e:
                 return f"YAML Error: {e}"
         elif file_type == "csv":
             import csv
 
             output = []
-            for row in csv.reader(StringIO(str(file_content))):
+            for row in csv.reader(StringIO(file_content.decode(errors="replace"))):
                 output.append(list(row))
 
         elif file_type == "pdf":
@@ -367,20 +373,26 @@ class Tools:
             with tempfile.NamedTemporaryFile(delete=False) as tmp:
                 tmp.write(file_content)
                 tmp_path = tmp.name
-            clip = moviepy.VideoFileClip(tmp_path)
-            clip.close()
-            os.remove(tmp_path)
 
-            output = {
-                "duration": clip.duration,
-                "fps": clip.fps,
-                "width": clip.w,
-                "height": clip.h,
-                "has_audio": clip.audio is not None,
-                "audio_channels": clip.audio.nchannels if clip.audio else None,
-                "audio_fps": clip.audio.fps if clip.audio else None,
-                "misc": clip.reader.infos,
-            }
+            clip = None
+            try:
+                clip = moviepy.VideoFileClip(tmp_path)
+
+                output = {
+                    "duration": clip.duration,
+                    "fps": clip.fps,
+                    "width": clip.w,
+                    "height": clip.h,
+                    "has_audio": clip.audio is not None,
+                    "audio_channels": clip.audio.nchannels if clip.audio else None,
+                    "audio_fps": clip.audio.fps if clip.audio else None,
+                    "misc": getattr(clip.reader, "infos", None),
+                }
+            finally:
+                if clip:
+                    clip.close()
+                os.remove(tmp_path)
+
         elif file_type == "zip":
             import zipfile
 
@@ -406,6 +418,7 @@ class Tools:
             return "user submitted an executable file. use a tool call that searches the web to fetch further information."
         else:
             # some unknown file format
+            # add MIME type-based processing later
             output = (
                 "unsupported file format! you have to use another tool to process this."
             )
