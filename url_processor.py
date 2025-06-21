@@ -2,9 +2,27 @@
 title: URL Processor
 author: Rose22
 author_url: https://github.com/Rose22
+git_url: https://github.com/Rose22/open-webui-tool-url-processor
+description: processes any link you throw at the AI, from websites to images to archives to scripts to anything inbetween.
 requirements: bs4, xmltodict, pypdf, tinytag, moviepy, youtube-transcript-api, rarfile
-version: 0.1.1
+version: 1.0
+license: GPL3
 """
+
+#  Copyright (C) 2025  Rose22
+#
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 from pydantic import BaseModel, Field
 import os
@@ -118,7 +136,9 @@ class Tools:
                         transcript_obj_list = list(ytt_api.list(video_id))
                         transcript_obj = transcript_obj_list[0].fetch()
                     except Exception as e:
-                        return f"ERROR: error while fetching youtube transcript! {e}"
+                        raise Exception(
+                            f"ERROR: error while fetching youtube transcript! {e}"
+                        )
 
                 transcript = []
                 for snippet in transcript_obj:
@@ -150,7 +170,7 @@ class Tools:
 
                 # so if it fails, just fall back on just processing it as a webpage.
                 # at least we get the title that way!
-                return f"ERROR: error while fetching youtube video data! {e}"
+                pass
 
         if (
             file_ext in ("htm", "html", "xhtml", "php", "asp")
