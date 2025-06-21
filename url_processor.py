@@ -5,7 +5,7 @@ author_url: https://github.com/Rose22
 git_url: https://github.com/Rose22/open-webui-tool-url-processor
 description: processes any link you throw at the AI, from websites to images to archives to scripts to anything inbetween.
 requirements: bs4, xmltodict, pypdf, tinytag, moviepy, youtube-transcript-api, rarfile
-version: 1.0
+version: 1.1
 license: GPL3
 """
 
@@ -23,6 +23,11 @@ license: GPL3
 #
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+####
+# NOTE: for the youtube processor to work, you have to use the very latest version of youtube-transcript-api.
+# as of the time of writing this, that's only available on their github, and the version on PIP is out of date!
+# so please manually install that version for youtube processing to work.
 
 from pydantic import BaseModel, Field
 import os
