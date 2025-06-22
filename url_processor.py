@@ -528,17 +528,21 @@ class Tools:
         processes multiple url's in sequence. can process the exact same data types as process_url.
         use this instead of process_url if user provided multiple url's!
         """
+
         output = []
 
-        async def handle_one(url, i):
-            try:
-                result = await self.process_url(url, __user__, __event_emitter__)
-                await emit_message(__event_emitter__, f"Processed link {i}\n")
-                return result
-            except Exception as e:
-                return [f"ERROR Processing URL {url}: {e}"]
+        # limit to 4 threads at once
+        semaphore = asyncio.Semaphore(4)
 
-        # launch them all as tasks in multiple threads!
+        async def handle_one(url, i):
+            async with semaphore:
+                try:
+                    result = await self.process_url(url, __user__, __event_emitter__)
+                    await emit_message(__event_emitter__, f"Processed link {i}\n")
+                    return result
+                except Exception as e:
+                    return [f"ERROR Processing URL {url}: {e}"]
+
         tasks = [handle_one(url, i) for i, url in enumerate(urls)]
         output = await asyncio.gather(*tasks)
 
