@@ -533,7 +533,7 @@ class Tools:
         async def handle_one(url, i):
             try:
                 result = await self.process_url(url, __user__, __event_emitter__)
-                await emit_message(__event_emitter__, f"Processed url {i}\n")
+                await emit_message(__event_emitter__, f"Processed link {i}\n")
                 return result
             except Exception as e:
                 return [f"ERROR Processing URL {url}: {e}"]
@@ -541,5 +541,7 @@ class Tools:
         # launch them all as tasks in multiple threads!
         tasks = [handle_one(url, i) for i, url in enumerate(urls)]
         output = await asyncio.gather(*tasks)
+
+        await emit_status(__event_emitter__, f"Processed all links", True)
 
         return output
