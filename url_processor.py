@@ -525,7 +525,7 @@ class Tools:
         self, urls: list, __user__: dict, __event_emitter__=None
     ) -> str:
         """
-        processes multiple url's in sequence. can process the exact same data types as process_url.
+        processes multiple url's at once. can process the exact same data types as process_url.
         use this instead of process_url if user provided multiple url's!
         """
 
