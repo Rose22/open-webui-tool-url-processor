@@ -27,10 +27,35 @@ license: GPL3
 ####
 # NOTE: for the youtube processor to work, you have to use the very latest version of youtube-transcript-api.
 # as of the time of writing this, that's only available on their github, and the version on PIP is out of date!
-# so please manually install that version for youtube processing to work.
+# so please manually install that version for youtube Processing to work.
 
 from pydantic import BaseModel, Field
 import os
+import asyncio
+import aiohttp
+
+
+async def emit_status(event_emitter, description: str, done: bool):
+    if event_emitter:
+        await event_emitter(
+            {
+                "type": "status",
+                "data": {
+                    "description": description,
+                    "done": done,
+                },
+            }
+        )
+
+
+async def emit_message(event_emitter, content: str):
+    if event_emitter:
+        await event_emitter(
+            {
+                "type": "message",
+                "data": {"content": content},
+            }
+        )
 
 
 class Tools:
@@ -45,7 +70,9 @@ class Tools:
 
         pass
 
-    def process_url(self, url: str) -> str:
+    async def process_url(
+        self, url: str, __user__: dict, __event_emitter__=None
+    ) -> str:
         """
         processes any url user may have provided.
 
@@ -75,21 +102,15 @@ class Tools:
         import urllib
 
         # we define functions inside this method so that the AI can't call them
-        def _request(url):
-            try:
-                conn = urllib.request.urlopen(
-                    urllib.request.Request(
-                        url=url,
-                        headers={"User-Agent": self.valves.user_agent},
-                    ),
-                    timeout=10,
-                )
-            except urllib.request.URLError:
-                raise Exception("Error: the URL was unreachable")
-            except urllib.request.HTTPError as e:
-                raise Exception(f"HTTP Error: {e.code} {e.reason}")
 
-            return conn
+        async def _request(url):
+            async with aiohttp.ClientSession(
+                headers={"User-Agent": self.valves.user_agent}
+            ) as session:
+                async with session.get(url, timeout=10) as response:
+                    if response.status != 200:
+                        raise Exception(f"Request failed with status {response.status}")
+                    return await response.read()
 
         def remove_duplicates(lst: list):
             # removes duplicates from a list
@@ -100,7 +121,72 @@ class Tools:
                     new_lst.append(item)
             return new_lst
 
-        def process_webpage(html):
+        async def process_domains(domain, url):
+            if "youtube" in domain or "youtu.be" in domain:
+                # this is a youtube link. try and get the transcript!
+                import youtube_transcript_api
+
+                err = None
+
+                await emit_status(
+                    __event_emitter__, "Processing youtube video..", False
+                )
+
+                # get video transcript using a python module
+                ytt_api = youtube_transcript_api.YouTubeTranscriptApi()
+
+                parsed = urllib.parse.urlparse(url)
+                # how to get the video id depends on if it's youtube or youtu.be
+                if "youtube" in domain:
+                    query = urllib.parse.parse_qs(parsed.query)
+                    video_id = query.get("v", [None])[0]
+                    if not video_id:
+                        err = "No video id found in URL"
+                elif domain == "youtu.be":
+                    video_id = parsed.path.lstrip("/")
+
+                try:
+                    transcript_obj = ytt_api.fetch(video_id)
+                except:
+                    # that likely means a transcript wasn't available in the preferred language.
+                    # so fall back on the first one available:
+                    try:
+                        transcript_obj_list = list(ytt_api.list(video_id))
+                        transcript_obj = transcript_obj_list[0].fetch()
+                    except Exception as e:
+                        err = f"couldn't find subtitles. tell the user the title of the video!"
+
+                # get video title using beautifulsoup
+                from bs4 import BeautifulSoup
+
+                html = await _request(url)
+                soup = await asyncio.to_thread(BeautifulSoup, html, "html.parser")
+
+                title = soup.find("title").get_text().strip()
+
+                transcript_dict = {"type": "youtube", "title": title}
+
+                if not err:
+                    transcript = []
+                    for snippet in transcript_obj:
+                        transcript.append(snippet.text)
+                    transcript_text = " ".join(transcript)
+
+                    transcript_dict["transcript"] = {
+                        "language": f"({transcript_obj.language_code}) {transcript_obj.language}",
+                        "auto_generated": transcript_obj.is_generated,
+                        "content": transcript_text,
+                        "words": len(transcript_text.split(" ")),
+                    }
+                else:
+                    transcript_dict["error"] = err
+
+                await emit_status(__event_emitter__, "Processed youtube video", True)
+                return transcript_dict
+
+            return False
+
+        async def process_webpage(html):
             # uses beautifulsoup to scrape a webpage
 
             output = {}
@@ -108,7 +194,9 @@ class Tools:
             import re
             from bs4 import BeautifulSoup
 
-            soup = BeautifulSoup(html, "html.parser")
+            soup = await asyncio.to_thread(BeautifulSoup, html, "html.parser")
+
+            await emit_status(__event_emitter__, "Processing website..", False)
 
             # we can usually get plenty of information from just the title, headers and paragraphs of a page!
             try:
@@ -138,7 +226,7 @@ class Tools:
                 del output["images"]
 
             # remove duplicates
-            for category in output.keys():
+            for category in list(output.keys()):
                 if category == "title":
                     continue
 
@@ -198,156 +286,46 @@ class Tools:
                             "nothing could be scraped from the page! use a web search tool call to find more information about this website."
                         )
 
+            await emit_status(__event_emitter__, "Processed website", True)
             return output
 
-        def process_domains(domain, url):
-            if "youtube" in domain or "youtu.be" in domain:
-                # this is a youtube link. try and get the transcript!
-                import youtube_transcript_api
+        async def process_text(file_content):
+            return file_content.decode(errors="replace")
 
-                err = None
-
-                # get video transcript using a python module
-                ytt_api = youtube_transcript_api.YouTubeTranscriptApi()
-
-                # how to get the video id depends on if it's youtube or youtu.be
-                if "youtube" in domain:
-                    try:
-                        # remove everything after the & sign first
-                        video_id = url.split("&")[0]
-                    except:
-                        video_id = url
-
-                    try:
-                        # then get everything after ?v=
-                        video_id = video_id.split("?v=")[1]
-                    except Exception as e:
-                        err = f"ERROR: malformed youtube URL! {e}"
-                elif domain == "youtu.be":
-                    try:
-                        video_id = url.split("?")[0]
-                    except IndexError:
-                        video_id = url.split("/")[-1]
-
-                try:
-                    transcript_obj = ytt_api.fetch(video_id)
-                except:
-                    # that likely means a transcript wasn't available in the preferred language.
-                    # so fall back on the first one available:
-                    try:
-                        transcript_obj_list = list(ytt_api.list(video_id))
-                        transcript_obj = transcript_obj_list[0].fetch()
-                    except Exception as e:
-                        err = f"couldn't find subtitles. tell the user the title of the video!"
-
-                # get video title using beautifulsoup
-                from bs4 import BeautifulSoup
-
-                html = _request(url).read()
-                soup = BeautifulSoup(html, "html.parser")
-                title = soup.find("title").get_text().strip()
-
-                transcript_dict = {"type": "youtube", "title": title}
-
-                if not err:
-                    transcript = []
-                    for snippet in transcript_obj:
-                        transcript.append(snippet.text)
-                    transcript_text = " ".join(transcript)
-
-                    transcript_dict["transcript"] = {
-                        "language": f"({transcript_obj.language_code}) {transcript_obj.language}",
-                        "auto_generated": transcript_obj.is_generated,
-                        "content": transcript_text,
-                        "words": len(transcript_text.split(" ")),
-                    }
-                else:
-                    transcript_dict["error"] = err
-
-                return transcript_dict
-
-            return False
-
-        ####################
-        # start main url processing
-        #####
-        output = {}
-
-        # parse the URL
-        url_parser = urllib.parse.urlparse(url)
-
-        domain = url_parser.netloc
-        file_name = url_parser.path.split("/")[-1]
-        file_name_split = file_name.split(".")
-        file_type = file_name_split[-1].lower() if len(file_name_split) > 1 else ""
-
-        # first, process any special domains, such as youtube
-        output = process_domains(domain, url)
-        if output:
-            return output
-
-        # then if that didn't do anything, switch to processing based on file type
-        from io import StringIO, BytesIO
-        import hashlib
-
-        # get the content of whatever file is at the url
-        file_content = _request(url).read()
-
-        if (
-            file_type in ("htm", "html", "xhtml", "php", "asp")
-            or len(file_name_split) <= 1
-        ):
-            # it's a normal web page
-            output = process_webpage(file_content.decode(errors="replace"))
-
-            # make it look fancy to the llm
-            file_type = "website"
-        elif file_type in ("txt", "md", "json", "log", "ini", "conf", "cfg"):
-            output = file_content.decode(errors="replace")
-        elif file_type in (
-            "sh",
-            "bat",
-            "py",
-            "c",
-            "cc",
-            "cpp",
-            "rs",
-            "pl",
-            "cgi",
-            "js",
-            "java",
-            "go",
-            "rb",
-            "sql",
-            "css",
-        ):
-            output = file_content.decode(errors="replace")
-        elif file_type in ("jpg", "jpeg", "png", "gif"):
+        async def process_image(file_content):
             import base64
 
-            output = base64.b64encode(file_content).decode("utf-8")
-        elif file_type == "xml":
+            return base64.b64encode(file_content).decode("utf-8")
+
+        async def process_xml(file_content):
             import xmltodict
 
-            output = xmltodict.parse(file_content.decode(errors="replace"))
-        elif file_type == "yaml":
+            return xmltodict.parse(file_content.decode(errors="replace"))
+
+        async def process_yaml(file_content):
             import yaml
             import json
 
             try:
-                output = json.dumps(
-                    yaml.safe_load(file_content.decode(errors="replace")), indent=2
+                return json.dumps(
+                    yaml.safe_load(file_content.decode(errors="replace")),
+                    indent=2,
                 )
             except yaml.YAMLError as e:
                 return f"YAML Error: {e}"
-        elif file_type == "csv":
+
+        async def process_csv(file_content):
+            from io import StringIO
             import csv
 
             output = []
             for row in csv.reader(StringIO(file_content.decode(errors="replace"))):
                 output.append(list(row))
 
-        elif file_type == "pdf":
+            return output
+
+        async def process_pdf(file_content):
+            from io import BytesIO
             import pypdf
 
             pdf_reader = pypdf.PdfReader(BytesIO(file_content))
@@ -357,13 +335,16 @@ class Tools:
                 if text:
                     pages_text.append(text)
 
-            output = pages_text
-        elif file_type in ("mp3", "m4a", "ogg", "flac", "wma", "aiff", "wav"):
+            return pages_text
+
+        async def process_audio(file_content):
+            from io import BytesIO
             import tinytag
 
             tag_reader = tinytag.TinyTag.get(file_obj=BytesIO(file_content))
-            output = tag_reader.as_dict()
-        elif file_type in ("mp4", "mov", "avi"):
+            return tag_reader.as_dict()
+
+        async def process_video(file_content):
             import moviepy
             import tempfile
 
@@ -376,7 +357,7 @@ class Tools:
 
             clip = None
             try:
-                clip = moviepy.VideoFileClip(tmp_path)
+                clip = await asyncio.to_thread(moviepy.VideoFileClip(tmp_path))
 
                 output = {
                     "duration": clip.duration,
@@ -393,20 +374,28 @@ class Tools:
                     clip.close()
                 os.remove(tmp_path)
 
-        elif file_type == "zip":
+            return output
+
+        async def process_zip(file_content):
+            from io import BytesIO
             import zipfile
 
             zip = zipfile.ZipFile(BytesIO(file_content))
+            return zip.namelist()
 
-            output = zip.namelist()
-        elif file_type == "rar":
+        async def process_rar(file_content):
+            from io import BytesIO
             import rarfile
 
             rar = rarfile.RarFile(BytesIO(file_content))
             output = []
             for f in rar.infolist():
                 output.append(f.filename)
-        elif file_type in ("tar", "gz"):
+
+            return output
+
+        async def process_tar(file_content):
+            from io import BytesIO
             import tarfile
 
             tar = tarfile.open(fileobj=BytesIO(file_content))
@@ -414,14 +403,114 @@ class Tools:
             output = []
             for f in tar.getmembers():
                 output.append(f.name)
-        elif file_type in ("exe", "dll", "msi", "com", "cmd", "msp", "so", "a", "la"):
+
+            return output
+
+        async def process_exe(file_content):
             return "user submitted an executable file. use a tool call that searches the web to fetch further information."
+
+        ####################
+        # start main url Processing
+        #####
+        output = {}
+
+        # parse the URL
+        url_parser = urllib.parse.urlparse(url)
+
+        domain = url_parser.netloc
+        file_name = url_parser.path.split("/")[-1]
+        file_name_split = file_name.split(".")
+        file_type = file_name_split[-1].lower() if len(file_name_split) > 1 else ""
+
+        await emit_status(__event_emitter__, "Checking known domains..", False)
+
+        # first, process any special domains, such as youtube
+        output = await process_domains(domain, url)
+        if output:
+            return output
+
+        # then if that didn't do anything, switch to Processing based on file type
+        import hashlib
+
+        await emit_status(__event_emitter__, "Fetching content..", False)
+        # get the content of whatever file is at the url
+        file_content = await _request(url)
+
+        await emit_status(__event_emitter__, "Checking file type..", False)
+
+        filetype_map = {
+            ("htm", "html", "xhtml", "php", "asp"): process_webpage,
+            (
+                "txt",
+                "md",
+                "json",
+                "log",
+                "ini",
+                "conf",
+                "cfg",
+                "sh",
+                "bat",
+                "py",
+                "c",
+                "cc",
+                "cpp",
+                "rs",
+                "pl",
+                "cgi",
+                "js",
+                "java",
+                "go",
+                "rb",
+                "sql",
+                "css",
+            ): process_text,
+            ("jpg", "jpeg", "png", "gif"): process_image,
+            ("mp3", "m4a", "ogg", "flac", "wma", "aiff", "wav"): process_audio,
+            ("mp4", "mov", "avi"): process_video,
+            ("tar", "gz", "tgz"): process_tar,
+            (
+                "exe",
+                "dll",
+                "msi",
+                "com",
+                "cmd",
+                "msp",
+                "so",
+                "a",
+                "la",
+            ): process_exe,
+            ("zip",): process_zip,
+            ("rar",): process_rar,
+            ("xml",): process_xml,
+            ("yaml",): process_yaml,
+            ("csv",): process_csv,
+            ("pdf",): process_pdf,
+        }
+
+        processor = None
+        for exts, fetched_processor in filetype_map.items():
+            if file_type in exts:
+                processor = fetched_processor
+                break
+
+        if processor:
+            await emit_status(
+                __event_emitter__, f"Processing {file_type} file..", False
+            )
+            output = await processor(file_content)
+            await emit_status(__event_emitter__, f"Processed {file_type} file", True)
+        elif len(file_name_split) <= 1:
+            # for now, we assume it's a website.
+            # TODO: add mime type checking
+            await emit_status(__event_emitter__, "Processing website..", False)
+            output = await process_webpage(file_content)
         else:
             # some unknown file format
-            # add MIME type-based processing later
+            # add MIME type-based Processing later
             output = (
                 "unsupported file format! you have to use another tool to process this."
             )
+            await emit_message(__event_emitter__, "unsupported file format!")
 
         return {
             "filename": file_name_split[0],
@@ -432,15 +521,25 @@ class Tools:
             "data": output,
         }
 
-    def process_multiple_urls(self, urls: list) -> str:
+    async def process_multiple_urls(
+        self, urls: list, __user__: dict, __event_emitter__=None
+    ) -> str:
         """
         processes multiple url's in sequence. can process the exact same data types as process_url.
         use this instead of process_url if user provided multiple url's!
         """
         output = []
-        for url in urls:
+
+        async def handle_one(url, i):
             try:
-                output.append(self.process_url(url))
+                result = await self.process_url(url, __user__, __event_emitter__)
+                await emit_message(__event_emitter__, f"Processed url {i}\n")
+                return result
             except Exception as e:
-                output.append([f"ERROR PROCESSING URL {url}: {e}"])
+                return [f"ERROR Processing URL {url}: {e}"]
+
+        # launch them all as tasks in multiple threads!
+        tasks = [handle_one(url, i) for i, url in enumerate(urls)]
+        output = await asyncio.gather(*tasks)
+
         return output
