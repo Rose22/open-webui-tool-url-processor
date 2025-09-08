@@ -5,7 +5,7 @@ author_url: https://github.com/Rose22
 git_url: https://github.com/Rose22/open-webui-tool-url-processor
 description: processes any link you throw at the AI, from websites to images to archives to scripts to anything inbetween.
 requirements: bs4, xmltodict, pypdf, tinytag, moviepy, youtube-transcript-api, rarfile
-version: 1.1
+version: 1.4
 license: GPL3
 """
 
@@ -121,72 +121,7 @@ class Tools:
                     new_lst.append(item)
             return new_lst
 
-        async def process_domains(domain, url):
-            if "youtube" in domain or "youtu.be" in domain:
-                # this is a youtube link. try and get the transcript!
-                import youtube_transcript_api
-
-                err = None
-
-                await emit_status(
-                    __event_emitter__, "Processing youtube video..", False
-                )
-
-                # get video transcript using a python module
-                ytt_api = youtube_transcript_api.YouTubeTranscriptApi()
-
-                parsed = urllib.parse.urlparse(url)
-                # how to get the video id depends on if it's youtube or youtu.be
-                if "youtube" in domain:
-                    query = urllib.parse.parse_qs(parsed.query)
-                    video_id = query.get("v", [None])[0]
-                    if not video_id:
-                        err = "No video id found in URL"
-                elif domain == "youtu.be":
-                    video_id = parsed.path.lstrip("/")
-
-                try:
-                    transcript_obj = ytt_api.fetch(video_id)
-                except:
-                    # that likely means a transcript wasn't available in the preferred language.
-                    # so fall back on the first one available:
-                    try:
-                        transcript_obj_list = list(ytt_api.list(video_id))
-                        transcript_obj = transcript_obj_list[0].fetch()
-                    except Exception as e:
-                        err = f"couldn't find subtitles. tell the user the title of the video!"
-
-                # get video title using beautifulsoup
-                from bs4 import BeautifulSoup
-
-                html = await _request(url)
-                soup = await asyncio.to_thread(BeautifulSoup, html, "html.parser")
-
-                title = soup.find("title").get_text().strip()
-
-                transcript_dict = {"type": "youtube", "title": title}
-
-                if not err:
-                    transcript = []
-                    for snippet in transcript_obj:
-                        transcript.append(snippet.text)
-                    transcript_text = " ".join(transcript)
-
-                    transcript_dict["transcript"] = {
-                        "language": f"({transcript_obj.language_code}) {transcript_obj.language}",
-                        "auto_generated": transcript_obj.is_generated,
-                        "content": transcript_text,
-                        "words": len(transcript_text.split(" ")),
-                    }
-                else:
-                    transcript_dict["error"] = err
-
-                await emit_status(__event_emitter__, "Processed youtube video", True)
-                return transcript_dict
-
-            return False
-
-        async def process_webpage(html):
+        async def process_webpage(html, list_urls: bool = False):
             # uses beautifulsoup to scrape a webpage
 
             output = {}
@@ -224,6 +159,13 @@ class Tools:
 
             if not output["images"]:
                 del output["images"]
+
+            if list_urls:
+                output["urls"] = []
+                for a in soup.find_all("a", href=True):
+                    output["urls"].append(a["href"])
+                if not output["urls"]:
+                    del output["urls"]
 
             # remove duplicates
             for category in list(output.keys()):
@@ -288,6 +230,112 @@ class Tools:
 
             await emit_status(__event_emitter__, "Processed website", True)
             return output
+
+        async def process_search(url):
+            html = await _request(url)
+
+            output = []
+
+            import re
+            from bs4 import BeautifulSoup
+
+            soup = await asyncio.to_thread(BeautifulSoup, html, "html.parser")
+
+            await emit_status(__event_emitter__, "Processing search..", False)
+
+            urls = []
+
+            headers = []
+            for header in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]):
+                headers.append(header.get_text().strip())
+
+            for a in soup.find_all("a", href=True):
+                urls.append(a["href"])
+
+            urls = remove_duplicates(urls)
+
+            processed_urls = []
+            for url in urls:
+                # get rid of duckduckgo's garbage
+                url = url.replace("//duckduckgo.com", "")
+                url = url.replace("/l/?uddg=", "")
+
+                url = urllib.parse.unquote(url)
+
+                # more garbage
+                url = url.split("&rut")[0]
+
+                if url in ["/html/", "/feedback.html"]:
+                    continue
+
+                processed_urls.append(url)
+
+            return await self.process_multiple_urls(processed_urls, __user__)
+
+        async def process_domains(domain, url):
+            if "youtube" in domain and "watch" in url or "youtu.be" in domain:
+                # this is a youtube link. try and get the transcript!
+                import youtube_transcript_api
+
+                err = None
+
+                await emit_status(
+                    __event_emitter__, "Processing youtube video..", False
+                )
+
+                # get video transcript using a python module
+                ytt_api = youtube_transcript_api.YouTubeTranscriptApi()
+
+                parsed = urllib.parse.urlparse(url)
+                # how to get the video id depends on if it's youtube or youtu.be
+                if "youtube" in domain:
+                    query = urllib.parse.parse_qs(parsed.query)
+                    video_id = query.get("v", [None])[0]
+                    if not video_id:
+                        err = "No video id found in URL"
+                elif domain == "youtu.be":
+                    video_id = parsed.path.lstrip("/")
+
+                try:
+                    transcript_obj = ytt_api.fetch(video_id)
+                except:
+                    # that likely means a transcript wasn't available in the preferred language.
+                    # so fall back on the first one available:
+                    try:
+                        transcript_obj_list = list(ytt_api.list(video_id))
+                        transcript_obj = transcript_obj_list[0].fetch()
+                    except Exception as e:
+                        err = f"couldn't find subtitles. tell the user the title of the video!"
+
+                # get video title using beautifulsoup
+                from bs4 import BeautifulSoup
+
+                html = await _request(url)
+                soup = await asyncio.to_thread(BeautifulSoup, html, "html.parser")
+
+                title = soup.find("title").get_text().strip()
+
+                transcript_dict = {"type": "youtube", "title": title}
+
+                if not err:
+                    transcript = []
+                    for snippet in transcript_obj:
+                        transcript.append(snippet.text)
+                    transcript_text = " ".join(transcript)
+
+                    transcript_dict["transcript"] = {
+                        "language": f"({transcript_obj.language_code}) {transcript_obj.language}",
+                        "auto_generated": transcript_obj.is_generated,
+                        "content": transcript_text,
+                        "words": len(transcript_text.split(" ")),
+                    }
+                else:
+                    transcript_dict["error"] = err
+
+                await emit_status(__event_emitter__, "Processed youtube video", True)
+                return transcript_dict
+            elif "duckduckgo" in domain:
+                return await process_search(url)
 
         async def process_text(file_content):
             return file_content.decode(errors="replace")
@@ -604,6 +652,12 @@ class Tools:
         async def handle_one(url, i):
             async with semaphore:
                 try:
+                    # for if the AI adds the url as a dict for some reason. it often does that!
+                    url = url["url"]
+                except:
+                    pass
+
+                try:
                     result = await self.process_url(url, __user__, __event_emitter__)
                     await emit_message(__event_emitter__, f"Processed link {i}\n")
                     return result
@@ -616,3 +670,22 @@ class Tools:
         await emit_status(__event_emitter__, f"Processed all links", True)
 
         return output
+
+    async def search_web(
+        self, query: str, __user__: dict, __event_emitter__=None
+    ) -> str:
+        """
+        search the web for a query. uses process_url internally to process the resulting page.
+        """
+
+        return await self.process_url(
+            f"https://duckduckgo.com/html/?q={query.replace(' ', '+')}", __user__
+        )
+
+    async def get_most_up_to_date_information(
+        self, query: str, __user__: dict, __event_emitter__=None
+    ) -> str:
+        """
+        get the most up to date information about something by searching the web.
+        """
+        return await self.search_web(query, __user__)
