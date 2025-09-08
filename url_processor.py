@@ -64,8 +64,8 @@ class Tools:
             default="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.3",
             description="the user agent to use for all web requests. the default should suffice!",
         )
-        multiple_urls_description_prompt: str = Field(
-            default="describe what was found. include links to the sources.",
+        description_prompt: str = Field(
+            default="describe what was found. if there are multiple urls, include links to the sources.",
             description="a system prompt that defines how the AI should present information from multiple urls at once, considering data often exceed context size.",
         )
 
@@ -75,10 +75,16 @@ class Tools:
         pass
 
     async def process_url(
-        self, url: str, __user__: dict, __event_emitter__=None
+        self,
+        url: str,
+        __user__: dict,
+        __event_emitter__=None,
+        multi: bool = False,
+        memory: str = False,
     ) -> str:
         """
         processes any url user may have provided.
+        use the "memory" argument for details that must be remembered by the LLM after parsing all the data, such as specific requests the user made about the data.
 
         will process:
         - websites
@@ -125,7 +131,7 @@ class Tools:
                     new_lst.append(item)
             return new_lst
 
-        async def process_webpage(html, list_urls: bool = False):
+        async def process_webpage(html):
             # uses beautifulsoup to scrape a webpage
 
             output = {}
@@ -163,13 +169,6 @@ class Tools:
 
             if not output["images"]:
                 del output["images"]
-
-            if list_urls:
-                output["urls"] = []
-                for a in soup.find_all("a", href=True):
-                    output["urls"].append(a["href"])
-                if not output["urls"]:
-                    del output["urls"]
 
             # remove duplicates
             for category in list(output.keys()):
@@ -233,6 +232,7 @@ class Tools:
                         )
 
             await emit_status(__event_emitter__, "Processed website", True)
+
             return output
 
         async def process_search(url):
@@ -274,7 +274,9 @@ class Tools:
 
                 processed_urls.append(url)
 
-            return await self.process_multiple_urls(processed_urls, __user__)
+            return await self.process_multiple_urls(
+                processed_urls, __user__, memory=memory
+            )
 
         async def process_domains(domain, url):
             if "youtube" in domain and "watch" in url or "youtu.be" in domain:
@@ -633,7 +635,7 @@ class Tools:
             )
             await emit_message(__event_emitter__, "unsupported file format!")
 
-        return {
+        result = {
             "url": url,
             "filename": file_name_split[0],
             "type": file_type,
@@ -642,12 +644,19 @@ class Tools:
             "data": output,
         }
 
+        if not multi:
+            result["ai_instructions"] = f"{self.valves.description_prompt} {memory}"
+
+        return result
+
     async def process_multiple_urls(
-        self, urls: list, __user__: dict, __event_emitter__=None
+        self, urls: list, __user__: dict, __event_emitter__=None, memory: str = False
     ) -> str:
         """
         processes multiple url's in sequence. can process the exact same data types as process_url.
         use this instead of process_url if user provided multiple url's!
+
+        use the "memory" argument for details that must be remembered by the LLM after parsing all the data, such as specific requests the user made about the data.
         """
 
         output = []
@@ -664,7 +673,9 @@ class Tools:
                     pass
 
                 try:
-                    result = await self.process_url(url, __user__, __event_emitter__)
+                    result = await self.process_url(
+                        url, __user__, __event_emitter__, multi=True
+                    )
                     await emit_message(__event_emitter__, f"Processed link {i}\n")
                     return result
                 except Exception as e:
@@ -677,24 +688,30 @@ class Tools:
 
         return {
             "results": output,
-            "ai_instructions": self.valves.multiple_urls_description_prompt,
+            "ai_instructions": f"{self.valves.description_prompt} {memory}",
         }
 
     async def search_web(
-        self, query: str, __user__: dict, __event_emitter__=None
+        self, query: str, __user__: dict, __event_emitter__=None, memory: str = False
     ) -> str:
         """
         search the web for a query. uses process_url internally to process the resulting page.
+
+        use the "memory" argument for details that must be remembered by the LLM after parsing all the data, such as specific requests the user made about the data.
         """
 
         return await self.process_url(
-            f"https://duckduckgo.com/html/?q={query.replace(' ', '+')}", __user__
+            f"https://duckduckgo.com/html/?q={query.replace(' ', '+')}",
+            __user__,
+            memory=memory,
         )
 
     async def get_most_up_to_date_information(
-        self, query: str, __user__: dict, __event_emitter__=None
+        self, query: str, __user__: dict, __event_emitter__=None, memory: str = False
     ) -> str:
         """
         get the most up to date information about something by searching the web.
+
+        use the "memory" argument for details that must be remembered by the LLM after parsing all the data, such as specific requests the user made about the data.
         """
-        return await self.search_web(query, __user__)
+        return await self.search_web(query, __user__, memory=memory)
