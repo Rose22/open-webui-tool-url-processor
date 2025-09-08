@@ -5,7 +5,7 @@ author_url: https://github.com/Rose22
 git_url: https://github.com/Rose22/open-webui-tool-url-processor
 description: processes any link you throw at the AI, from websites to images to archives to scripts to anything inbetween.
 requirements: bs4, xmltodict, pypdf, tinytag, moviepy, youtube-transcript-api, rarfile
-version: 1.5
+version: 1.6
 license: GPL3
 """
 
@@ -64,10 +64,6 @@ class Tools:
             default="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.3",
             description="the user agent to use for all web requests. the default should suffice!",
         )
-        description_prompt: str = Field(
-            default="describe what was found. if there are multiple urls, include links to the sources.",
-            description="a system prompt that defines how the AI should present information from multiple urls at once, considering data often exceed context size.",
-        )
 
     def __init__(self):
         self.valves = self.Valves()
@@ -77,14 +73,16 @@ class Tools:
     async def process_url(
         self,
         url: str,
+        purpose: str,
+        memory: str,
         __user__: dict,
         __event_emitter__=None,
         multi: bool = False,
-        memory: str = False,
     ) -> str:
         """
         processes any url user may have provided.
-        use the "memory" argument for details that must be remembered by the LLM after parsing all the data, such as specific requests the user made about the data.
+        use the "purpose" argument to describe the purpose of this request.
+        use the "memory" argument for details that must be remembered by the LLM after parsing all the data, such as details about the user.
 
         will process:
         - websites
@@ -275,7 +273,7 @@ class Tools:
                 processed_urls.append(url)
 
             return await self.process_multiple_urls(
-                processed_urls, __user__, memory=memory
+                processed_urls, purpose, memory, __user__
             )
 
         async def process_domains(domain, url):
@@ -645,18 +643,27 @@ class Tools:
         }
 
         if not multi:
-            result["ai_instructions"] = f"{self.valves.description_prompt} {memory}"
+            result["ai_instructions"] = {
+                "important_details": memory,
+                "purpose_of_request": purpose,
+            }
 
         return result
 
     async def process_multiple_urls(
-        self, urls: list, __user__: dict, __event_emitter__=None, memory: str = False
+        self,
+        urls: list,
+        purpose: str,
+        memory: str,
+        __user__: dict,
+        __event_emitter__=None,
     ) -> str:
         """
         processes multiple url's in sequence. can process the exact same data types as process_url.
         use this instead of process_url if user provided multiple url's!
 
-        use the "memory" argument for details that must be remembered by the LLM after parsing all the data, such as specific requests the user made about the data.
+        use the "purpose" argument to describe the purpose of this request.
+        use the "memory" argument for details that must be remembered by the LLM after parsing all the data, such as details about the user.
         """
 
         output = []
@@ -674,7 +681,7 @@ class Tools:
 
                 try:
                     result = await self.process_url(
-                        url, __user__, __event_emitter__, multi=True
+                        url, purpose, memory, __user__, __event_emitter__, multi=True
                     )
                     await emit_message(__event_emitter__, f"Processed link {i}\n")
                     return result
@@ -688,30 +695,46 @@ class Tools:
 
         return {
             "results": output,
-            "ai_instructions": f"{self.valves.description_prompt} {memory}",
+            "ai_instructions": {
+                "important_details": memory,
+                "purpose_of_request": f"{purpose}. Include links to all sources.",
+            },
         }
 
     async def search_web(
-        self, query: str, __user__: dict, __event_emitter__=None, memory: str = False
+        self,
+        query: str,
+        purpose: str,
+        memory: str,
+        __user__: dict,
+        __event_emitter__=None,
     ) -> str:
         """
         search the web for a query. uses process_url internally to process the resulting page.
 
-        use the "memory" argument for details that must be remembered by the LLM after parsing all the data, such as specific requests the user made about the data.
+        use the "purpose" argument to describe the purpose of this request.
+        use the "memory" argument for details that must be remembered by the LLM after parsing all the data, such as details about the user.
         """
 
         return await self.process_url(
             f"https://duckduckgo.com/html/?q={query.replace(' ', '+')}",
+            purpose,
+            memory,
             __user__,
-            memory=memory,
         )
 
     async def get_most_up_to_date_information(
-        self, query: str, __user__: dict, __event_emitter__=None, memory: str = False
+        self,
+        query: str,
+        purpose: str,
+        memory: str,
+        __user__: dict,
+        __event_emitter__=None,
     ) -> str:
         """
         get the most up to date information about something by searching the web.
 
-        use the "memory" argument for details that must be remembered by the LLM after parsing all the data, such as specific requests the user made about the data.
+        use the "purpose" argument to describe the purpose of this request.
+        use the "memory" argument for details that must be remembered by the LLM after parsing all the data, such as details about the user.
         """
-        return await self.search_web(query, __user__, memory=memory)
+        return await self.search_web(query, purpose, memory, __user__)
