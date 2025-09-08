@@ -66,7 +66,7 @@ class Tools:
         )
         multiple_urls_description_prompt: str = Field(
             default="describe what was found. include links to the sources.",
-            description="a system prompt that defines how the AI should present information from multiple urls at once, considering the total search results often exceed context size.",
+            description="a system prompt that defines how the AI should present information from multiple urls at once, considering data often exceed context size.",
         )
 
     def __init__(self):
