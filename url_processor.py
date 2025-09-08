@@ -64,6 +64,10 @@ class Tools:
             default="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.3",
             description="the user agent to use for all web requests. the default should suffice!",
         )
+        multiple_urls_description_prompt: str = Field(
+            default="describe what was found. include links to the sources.",
+            description="a system prompt that defines how the AI should present information from multiple urls at once, considering the total search results often exceed context size.",
+        )
 
     def __init__(self):
         self.valves = self.Valves()
@@ -619,6 +623,8 @@ class Tools:
             # TODO: add mime type checking
             await emit_status(__event_emitter__, "Processing website..", False)
             output = await process_webpage(file_content)
+
+            file_type = "website"
         else:
             # some unknown file format
             # add MIME type-based Processing later
@@ -628,11 +634,11 @@ class Tools:
             await emit_message(__event_emitter__, "unsupported file format!")
 
         return {
+            "url": url,
             "filename": file_name_split[0],
             "type": file_type,
             "size": len(file_content),
             "checksum": hashlib.sha256(file_content).hexdigest(),
-            "domain": domain,
             "data": output,
         }
 
@@ -669,7 +675,10 @@ class Tools:
 
         await emit_status(__event_emitter__, f"Processed all links", True)
 
-        return output
+        return {
+            "results": output,
+            "ai_instructions": self.valves.multiple_urls_description_prompt,
+        }
 
     async def search_web(
         self, query: str, __user__: dict, __event_emitter__=None
