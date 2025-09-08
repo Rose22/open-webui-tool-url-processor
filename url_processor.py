@@ -5,7 +5,7 @@ author_url: https://github.com/Rose22
 git_url: https://github.com/Rose22/open-webui-tool-url-processor
 description: processes any link you throw at the AI, from websites to images to archives to scripts to anything inbetween.
 requirements: bs4, xmltodict, pypdf, tinytag, moviepy, youtube-transcript-api, rarfile
-version: 1.4
+version: 1.5
 license: GPL3
 """
 
